@@ -7,6 +7,7 @@ import {
   loadEdgeAuthSecret,
   parseScopes,
   parseWriteAllowlist,
+  VALID_SCOPES,
 } from '../../src/config.js';
 import { ServiceCategory } from '../../src/types.js';
 
@@ -349,5 +350,17 @@ describe('loadEdgeAuthSecret', () => {
   it('should return MCP_EDGE_AUTH_SECRET when set', () => {
     process.env['MCP_EDGE_AUTH_SECRET'] = 'cf-rule-secret';
     expect(loadEdgeAuthSecret()).toBe('cf-rule-secret');
+  });
+});
+
+describe('context scope', () => {
+  it('maps services_scope=context to the core and context categories', () => {
+    expect(parseScopes('context')).toEqual({
+      categories: new Set([ServiceCategory.Core, ServiceCategory.Context]),
+    });
+  });
+
+  it('lists context as a valid scope', () => {
+    expect(VALID_SCOPES).toContain('context');
   });
 });

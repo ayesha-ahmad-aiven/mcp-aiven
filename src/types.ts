@@ -8,6 +8,7 @@ export enum ServiceCategory {
   Kafka = 'kafka',
   Application = 'application',
   Integrations = 'integrations',
+  Context = 'context',
 }
 
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
