@@ -1,7 +1,12 @@
 import { createHash } from 'node:crypto';
 import { describe, it, expect } from 'vitest';
 import type { Request } from 'express';
-import { parseMcpQueryParams, bearerRateLimitKey, inboundMcpClientIpFromRequest } from '../../src/transport.js';
+import {
+  parseMcpQueryParams,
+  bearerRateLimitKey,
+  inboundMcpClientIpFromRequest,
+  healthResponse,
+} from '../../src/transport.js';
 import { ServiceCategory } from '../../src/types.js';
 
 function makeReq(opts: {
@@ -357,5 +362,18 @@ describe('bearerRateLimitKey', () => {
       makeReq({ headers: { authorization: 'Bearer    ' } })
     );
     expect(key).toBe('__no_bearer__');
+  });
+});
+
+describe('healthResponse', () => {
+  it('reports ok without details', () => {
+    expect(healthResponse()).toEqual({ status: 'ok' });
+  });
+
+  it('adds details such as the Marmot status', () => {
+    expect(healthResponse({ marmot: 'unavailable' })).toEqual({
+      status: 'ok',
+      marmot: 'unavailable',
+    });
   });
 });

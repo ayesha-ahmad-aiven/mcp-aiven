@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // Must be first import so instrumentation can hook into Express and other modules
 import './instrumentation/index.js';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { loadConfig } from './config.js';
+import { constants as osConstants } from 'node:os';
+import { loadConfig, loadMarmotConfig } from './config.js';
 import { AivenClient } from './client.js';
+import { errorMessage } from './errors.js';
 import { loadApiTools } from './tools/registry.js';
 import { createKafkaCustomTools } from './tools/kafka/index.js';
 import { createPgCustomTools } from './tools/pg/index.js';
@@ -13,28 +14,19 @@ import { createServiceSearchTool } from './tools/service-search.js';
 import { createConnectionInfoTool } from './tools/connection-info.js';
 import { createStdioTransport, startHttpServer } from './transport.js';
 import type { ToolDefinition, McpRequestOptions } from './types.js';
-import { VERSION, API_ORIGIN, loadHttpMcpRateLimit, isExtraProtectionEnabled, loadEdgeAuthSecret } from './config.js';
-import { createObservabilityContext } from './observability.js';
-import { readOnlyInstructions, connectionInfoInstructions } from './prompts.js';
-import { instrumentServer, flushAndExit } from './instrumentation/index.js';
-import { scan } from './security/model-armor.js';
-import { unwrapUntrustedResponse } from './untrusted.js';
-import { toolError } from './types.js';
-import { sanitizeMcpClient } from './mcp-client-header.js';
+import {
+  VERSION,
+  API_ORIGIN,
+  loadHttpMcpRateLimit,
+  isExtraProtectionEnabled,
+  loadEdgeAuthSecret,
+} from './config.js';
+import { instrumentServer, flushAndExit, flushAndExitCleanly } from './instrumentation/index.js';
 import { summarizeCatalog } from './tool-catalog.js';
-
-/** Streamable HTTP: inbound `/mcp` `User-Agent` (SDK `requestInfo.headers`). */
-function mcpClientFromRequestInfo(requestInfo: unknown): string | undefined {
-  if (!requestInfo || typeof requestInfo !== 'object' || !('headers' in requestInfo)) {
-    return undefined;
-  }
-  const headersRaw = (requestInfo as { headers: unknown }).headers;
-  if (!headersRaw || typeof headersRaw !== 'object') return undefined;
-  const h = headersRaw as Record<string, string | undefined>;
-
-  const v = h['user-agent'] ?? h['User-Agent'];
-  return typeof v === 'string' && v.length > 0 ? v : undefined;
-}
+import { createMcpServerFactory, registerAdditionalTools } from './server-factory.js';
+import { createCallerAuthorizer } from './marmot/authorize.js';
+import { MarmotIntegration } from './marmot/integration.js';
+import { redactSecret } from './marmot/proxy-tools.js';
 
 function logEnvReport(): void {
   const names = Object.keys(process.env).sort();
@@ -52,9 +44,7 @@ function logEnvReport(): void {
  */
 function logToolCatalog(allTools: readonly ToolDefinition[]): void {
   const all = summarizeCatalog(allTools);
-  const readOnly = summarizeCatalog(
-    allTools.filter((t) => t.definition.annotations.readOnlyHint)
-  );
+  const readOnly = summarizeCatalog(allTools.filter((t) => t.definition.annotations.readOnlyHint));
   console.error(
     `mcp-aiven: ${all.count} tools registered fp=${all.fingerprint} ` +
       `(read-only: ${readOnly.count} fp=${readOnly.fingerprint}) v=${VERSION}`
@@ -73,99 +63,72 @@ function loadAllTools(client: AivenClient): ToolDefinition[] {
   ];
 }
 
-function registerTools(server: McpServer, tools: readonly ToolDefinition[], requestOptions: McpRequestOptions): void {
-  for (const tool of tools) {
-    server.registerTool(
-      tool.name,
-      {
-        title: tool.definition.title,
-        description: tool.definition.description,
-        inputSchema: tool.definition.inputSchema,
-        annotations: tool.definition.annotations,
-        ...(tool.definition.outputSchema ? { outputSchema: tool.definition.outputSchema } : {}),
-      },
-      async (params, extra) => {
-        const paramsObj = params as Record<string, unknown>;
-        const reasoning = paramsObj['reasoning'] as string | undefined;
-        const obsContext = createObservabilityContext(reasoning);
+const MARMOT_CLOSE_TIMEOUT_MS = 5_000;
 
-        const context = {
-          token: extra.authInfo?.token,
-          mcpClient: sanitizeMcpClient(
-            mcpClientFromRequestInfo(extra.requestInfo) ?? server.server.getClientVersion()?.name
-          ),
-          clientIp: requestOptions.clientIp,
-          requestId: obsContext.requestId,
-          toolReasoning: obsContext.toolReasoning,
-        };
-
-        // Scan tool input for prompt injection / jailbreak before acting on it.
-        // Skip `reasoning` (model-generated metadata) and send the raw JSON params.
-        const scanParams = Object.fromEntries(
-          Object.entries(paramsObj).filter(([key]) => key !== 'reasoning')
-        );
-        const inputText = JSON.stringify(scanParams);
-        const inputBlocked = await scan(inputText);
-        if (inputBlocked) return toolError(inputBlocked);
-
-        const result = await tool.handler(params, context);
-
-        // Scan tool output so poisoned Aiven data can't inject the user's LLM.
-        // Unwrap our own untrusted-data boundary first — its warning text would
-        // otherwise trip the prompt-injection filter.
-        const outputText = result.content
-          .map((c) => (c.type === 'text' ? unwrapUntrustedResponse(c.text) : ''))
-          .join('\n');
-        const outputBlocked = await scan(outputText, 'output');
-        if (outputBlocked) return toolError(outputBlocked);
-
-        return result;
-      }
-    );
+function closeOnShutdown(marmot: MarmotIntegration): void {
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(signal, () => {
+      const timeout = new Promise<void>((resolve) => {
+        setTimeout(resolve, MARMOT_CLOSE_TIMEOUT_MS);
+      });
+      const closed = marmot.close().catch(() => undefined);
+      void Promise.race([closed, timeout]).then(() =>
+        flushAndExitCleanly(128 + osConstants.signals[signal])
+      );
+    });
   }
+}
+
+function startMarmotInBackground(marmot: MarmotIntegration, apiKey: string): void {
+  marmot.start().catch((error: unknown) => {
+    console.error(`mcp-aiven: Marmot startup failed: ${redactSecret(errorMessage(error), apiKey)}`);
+  });
+}
+
+// A throwing listener would stop MarmotIntegration's background rediscovery.
+function onMarmotToolsDiscovered(
+  marmot: MarmotIntegration,
+  listener: (tools: readonly ToolDefinition[]) => void
+): void {
+  marmot.onToolsDiscovered((tools) => {
+    try {
+      listener(tools);
+    } catch (error) {
+      console.error(
+        `mcp-aiven: failed to add Marmot data catalog tools to the server: ${errorMessage(error)}`
+      );
+    }
+  });
 }
 
 async function main(): Promise<void> {
   const transport = process.env['MCP_TRANSPORT'] === 'http' ? 'http' : 'stdio';
   logEnvReport();
   const config = loadConfig(transport);
+  const marmotConfig = loadMarmotConfig();
   const client = new AivenClient(config);
 
-  const allTools: readonly ToolDefinition[] = loadAllTools(client);
-  logToolCatalog(allTools);
+  const aivenTools: readonly ToolDefinition[] = loadAllTools(client);
+  const existingToolNames = new Set(
+    [...aivenTools, ...createConnectionInfoTool(client, false)].map((tool) => tool.name)
+  );
+  const marmot = new MarmotIntegration({
+    config: marmotConfig,
+    existingToolNames,
+    authorize: createCallerAuthorizer(client),
+  });
+  if (marmotConfig) closeOnShutdown(marmot);
 
-  function createMcpServer(options: McpRequestOptions): McpServer {
-    let tools: readonly ToolDefinition[] = allTools;
-    if (options.readOnly) {
-      const allowlist = options.writeAllowlist;
-      tools = tools.filter((t) => t.definition.annotations.readOnlyHint || allowlist?.has(t.name));
-    }
-    if (options.categories) {
-      const allowed = options.categories;
-      tools = tools.filter((t) => allowed.has(t.category));
-    }
+  const getTools = (): readonly ToolDefinition[] => [...aivenTools, ...marmot.tools];
+  logToolCatalog(getTools());
+  onMarmotToolsDiscovered(marmot, () => {
+    logToolCatalog(getTools());
+  });
 
-    if (options.allowSecrets) {
-      tools = [...tools, ...createConnectionInfoTool(client, options.readOnly)];
-    }
-
-    const instructions: string[] = [];
-    if (options.readOnly) instructions.push(readOnlyInstructions(transport, options.writeAllowlist));
-    instructions.push(connectionInfoInstructions(options.allowSecrets, options.readOnly, transport));
-
-    const serverOptions =
-      instructions.length > 0 ? ([{ instructions: instructions.join(' ') }] as const) : ([] as const);
-
-    const server = new McpServer({ name: 'mcp-aiven', version: VERSION }, ...serverOptions);
-    registerTools(server, tools, options);
-    return server;
-  }
+  const createMcpServer = createMcpServerFactory({ transport, client, getTools });
 
   if (transport === 'http') {
-    const createInstrumentedServer = (options: McpRequestOptions): McpServer => {
-      return instrumentServer(createMcpServer(options));
-    };
-    startHttpServer(createInstrumentedServer, {
+    startHttpServer((options) => instrumentServer(createMcpServer(options)), {
       port: parseInt(process.env['PORT'] ?? '3000', 10),
       apiOrigin: API_ORIGIN,
       scopes: ['projects', 'services', 'accounts:read'],
@@ -173,19 +136,26 @@ async function main(): Promise<void> {
       readOnly: config.readOnly,
       extraProtection: isExtraProtectionEnabled(),
       edgeAuthSecret: loadEdgeAuthSecret(),
+      healthDetails: marmotConfig
+        ? (): Record<string, string> => ({ marmot: marmot.status })
+        : undefined,
     });
   } else {
-    const server = instrumentServer(
-      createMcpServer({
-        readOnly: config.readOnly,
-        categories: config.categories,
-        allowSecrets: config.allowSecrets,
-        writeAllowlist: config.writeAllowlist,
-      })
-    );
+    const options: McpRequestOptions = {
+      readOnly: config.readOnly,
+      categories: config.categories,
+      allowSecrets: config.allowSecrets,
+      writeAllowlist: config.writeAllowlist,
+    };
+    const server = instrumentServer(createMcpServer(options));
+    onMarmotToolsDiscovered(marmot, (tools) => {
+      registerAdditionalTools(server, tools, options);
+    });
     await server.connect(createStdioTransport());
     console.error('mcp-aiven: Server connected and ready');
   }
+
+  if (marmotConfig) startMarmotInBackground(marmot, marmotConfig.apiKey);
 }
 
 main().catch(async (error: unknown) => {

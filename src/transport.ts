@@ -37,6 +37,7 @@ export interface HttpServerConfig {
   readOnly: boolean;
   extraProtection: boolean;
   edgeAuthSecret: string | undefined;
+  healthDetails?: (() => Record<string, string>) | undefined;
 }
 
 const RATE_LIMIT_PROPERTY = 'rateLimit' as const;
@@ -223,6 +224,10 @@ export function parseMcpQueryParams(
   return { options: { readOnly, categories: parsed.categories, allowSecrets, writeAllowlist } };
 }
 
+export function healthResponse(details?: Record<string, string>): Record<string, string> {
+  return { status: 'ok', ...details };
+}
+
 export function startHttpServer(
   createServer: McpServerFactory,
   config: HttpServerConfig
@@ -269,7 +274,7 @@ export function startHttpServer(
   });
 
   app.get('/health', (_req: Request, res: Response) => {
-    res.json({ status: 'ok' });
+    res.json(healthResponse(config.healthDetails?.()));
   });
 
   const protectedResource = (req: Request, res: Response): void => {

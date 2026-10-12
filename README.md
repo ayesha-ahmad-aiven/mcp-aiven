@@ -74,7 +74,7 @@ Enable read-only mode by adding `?read_only=true` to the URL. All write operatio
 
 Reduce the tool surface exposed to your AI agent by adding `?services_scope=` to the URL. Useful when you only work with a subset of Aiven services and want to keep the agent's context focused. Combine values with commas. `core` (project/service discovery) is always included implicitly.
 
-Valid scopes: `all`, `core`, `pg`, `kafka`, `application`, `integrations`. Use `all` to explicitly load every tool (same as omitting the param). `all` cannot be combined with other scopes.
+Valid scopes: `all`, `core`, `pg`, `kafka`, `application`, `integrations`, `context`. Use `all` to explicitly load every tool (same as omitting the param). `all` cannot be combined with other scopes.
 
 ```json
 {
@@ -179,7 +179,7 @@ MCP_HOST=http://localhost:3000 node dist/index.js
 |---|---|---|---|
 | `AIVEN_TOKEN` | stdio only | -- | Aiven API token ([create one here](https://console.aiven.io/profile/tokens)) |
 | `AIVEN_READ_ONLY` | No | `false` | Set to `true` to expose only read-only tools |
-| `AIVEN_SERVICES_SCOPE` | No | -- | Comma-separated scopes to expose (e.g. `kafka`, `pg,kafka`, or `all`). Valid: `all`, `core`, `pg`, `kafka`, `application`, `integrations`. `core` is always included. Omitting the var or setting `all` loads every tool. |
+| `AIVEN_SERVICES_SCOPE` | No | -- | Comma-separated scopes to expose (e.g. `kafka`, `pg,kafka`, or `all`). Valid: `all`, `core`, `pg`, `kafka`, `application`, `integrations`, `context`. `core` is always included. Omitting the var or setting `all` loads every tool. |
 | `AIVEN_ALLOW_SECRETS` | No | `false` | Set to `true` to expose the `aiven_service_connection_info` tool, which returns live credentials (passwords, connection URIs, certs) into the conversation. Disabled while `AIVEN_READ_ONLY=true`. |
 | `AIVEN_WRITE_ALLOWLIST` | No | -- | Comma-separated tool names to re-enable while `AIVEN_READ_ONLY=true` (e.g. `aiven_kafka_topic_create`). Ignored when read-only mode is not enabled. |
 | `MCP_HOST` | No | `https://mcp.aiven.live` | Override the OAuth protected resource host |
@@ -188,10 +188,26 @@ MCP_HOST=http://localhost:3000 node dist/index.js
 | `MCP_HTTP_RATE_LIMIT_WINDOW_MS` | No | `60000` | Window length in milliseconds for `MCP_HTTP_RATE_LIMIT_MAX`. |
 | `EXTRA_PROTECTION` | No | `false` | Set to `true` on HTTP deployments to require a valid `X-Edge-Auth` header on every request except `GET /health`. See [Edge protection rollout](#edge-protection-rollout) below. |
 | `MCP_EDGE_AUTH_SECRET` | When `EXTRA_PROTECTION=true` | -- | Shared secret; must match the value Cloudflare injects as `X-Edge-Auth` via Transform Rules. |
+| `MARMOT_MCP_URL` | No | -- | Marmot base URL. Enables the Marmot data catalog tools. `/api/v1/mcp` is appended when the URL has no path. Requires `MARMOT_MCP_API_KEY`. |
+| `MARMOT_MCP_API_KEY` | With `MARMOT_MCP_URL` | -- | Marmot API key shared by every caller. |
 
 In remote (HTTP) mode, `AIVEN_TOKEN` is not needed. Your MCP client sends your token as a Bearer token with each request.
 
 Production HTTP traffic is rate-limited in two layers: Cloudflare enforces a per-client-IP limit (configured in the Cloudflare dashboard), and this server enforces `MCP_HTTP_RATE_LIMIT_*` per bearer token on `POST /mcp`.
+
+### Marmot data catalog tools (demo)
+
+`mcp-aiven` can expose the tools of a [Marmot](https://marmotdata.io) data catalog as `aiven_context_*` tools. For example, Marmot's `discover_data` becomes `aiven_context_discover_data`. Set `MARMOT_MCP_URL` and `MARMOT_MCP_API_KEY` to enable them:
+
+```bash
+MARMOT_MCP_URL=https://marmot.example.com MARMOT_MCP_API_KEY=<key> node dist/index.js
+```
+
+Callers need a valid Aiven token. Every caller uses the same Marmot API key, and any Aiven user who can reach the server can call these tools. Use a Marmot service account with view permissions only, and keep only demo data in Marmot.
+
+The server does not wait for Marmot: it starts serving the Aiven tools immediately and adds the Marmot tools once discovery succeeds. If Marmot is unreachable, it retries every 60 seconds. If a Marmot tool name collides with an existing tool, the Marmot tools stay disabled until restart and the server keeps running. When Marmot is configured, `GET /health` reports `marmot` as `ok` or `unavailable`. The tools belong to the `context` scope.
+
+Marmot must accept the `Host` header of its public hostname.
 
 ### Edge protection rollout
 

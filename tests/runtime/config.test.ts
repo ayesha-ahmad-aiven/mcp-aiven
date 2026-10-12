@@ -1,12 +1,14 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   loadConfig,
+  loadMarmotConfig,
   loadHttpMcpRateLimit,
   isMaintenanceMode,
   isExtraProtectionEnabled,
   loadEdgeAuthSecret,
   parseScopes,
   parseWriteAllowlist,
+  VALID_SCOPES,
 } from '../../src/config.js';
 import { ServiceCategory } from '../../src/types.js';
 
@@ -349,5 +351,96 @@ describe('loadEdgeAuthSecret', () => {
   it('should return MCP_EDGE_AUTH_SECRET when set', () => {
     process.env['MCP_EDGE_AUTH_SECRET'] = 'cf-rule-secret';
     expect(loadEdgeAuthSecret()).toBe('cf-rule-secret');
+  });
+});
+
+describe('context scope', () => {
+  it('maps services_scope=context to the core and context categories', () => {
+    expect(parseScopes('context')).toEqual({
+      categories: new Set([ServiceCategory.Core, ServiceCategory.Context]),
+    });
+  });
+
+  it('lists context as a valid scope', () => {
+    expect(VALID_SCOPES).toContain('context');
+  });
+});
+
+describe('loadMarmotConfig', () => {
+  it('returns undefined when neither variable is set', () => {
+    expect(loadMarmotConfig({})).toBeUndefined();
+  });
+
+  it.each([[{ MARMOT_MCP_URL: 'https://marmot.example.com' }], [{ MARMOT_MCP_API_KEY: 'key' }]])(
+    'rejects partial configuration %o',
+    (env) => {
+      expect(() => loadMarmotConfig(env)).toThrow(
+        'MARMOT_MCP_URL and MARMOT_MCP_API_KEY must be set together'
+      );
+    }
+  );
+
+  it('rejects an unparseable URL', () => {
+    expect(() =>
+      loadMarmotConfig({ MARMOT_MCP_URL: 'not a url', MARMOT_MCP_API_KEY: 'key' })
+    ).toThrow('MARMOT_MCP_URL is not a valid URL');
+  });
+
+  it('rejects protocols other than http and https', () => {
+    expect(() =>
+      loadMarmotConfig({ MARMOT_MCP_URL: 'ftp://marmot.example.com', MARMOT_MCP_API_KEY: 'key' })
+    ).toThrow('MARMOT_MCP_URL must use http:// or https://');
+  });
+
+  it('appends the MCP path to a base URL', () => {
+    const config = loadMarmotConfig({
+      MARMOT_MCP_URL: 'https://marmot.example.com',
+      MARMOT_MCP_API_KEY: 'key',
+    });
+    expect(config?.mcpUrl.toString()).toBe('https://marmot.example.com/api/v1/mcp');
+    expect(config?.apiKey).toBe('key');
+  });
+
+  it('keeps a URL that already has a path', () => {
+    const config = loadMarmotConfig({
+      MARMOT_MCP_URL: 'https://marmot.example.com/custom/mcp',
+      MARMOT_MCP_API_KEY: 'key',
+    });
+    expect(config?.mcpUrl.toString()).toBe('https://marmot.example.com/custom/mcp');
+  });
+
+  it('warns for http:// on a non-local host without logging the key', () => {
+    const warn = vi.fn();
+    loadMarmotConfig(
+      { MARMOT_MCP_URL: 'http://marmot.internal:8080', MARMOT_MCP_API_KEY: 'secret-key' },
+      warn
+    );
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[0]).toContain('marmot.internal:8080');
+    expect(warn.mock.calls[0]?.[0]).not.toContain('secret-key');
+  });
+
+  it('does not warn for http:// on localhost', () => {
+    const warn = vi.fn();
+    loadMarmotConfig({ MARMOT_MCP_URL: 'http://localhost:8080', MARMOT_MCP_API_KEY: 'key' }, warn);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('does not warn for http:// on IPv6 localhost', () => {
+    const warn = vi.fn();
+    loadMarmotConfig({ MARMOT_MCP_URL: 'http://[::1]:8080', MARMOT_MCP_API_KEY: 'key' }, warn);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('returns undefined when both variables are whitespace', () => {
+    expect(loadMarmotConfig({ MARMOT_MCP_URL: '  ', MARMOT_MCP_API_KEY: '  ' })).toBeUndefined();
+  });
+
+  it('appends the MCP path to a base URL with a trailing slash', () => {
+    const config = loadMarmotConfig({
+      MARMOT_MCP_URL: 'https://marmot.example.com/',
+      MARMOT_MCP_API_KEY: 'key',
+    });
+    expect(config?.mcpUrl.toString()).toBe('https://marmot.example.com/api/v1/mcp');
   });
 });

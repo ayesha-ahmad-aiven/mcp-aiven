@@ -26,6 +26,11 @@ export function captureException(error: unknown): void {
   sentry.captureException(error);
 }
 
+export async function flushAndExitCleanly(exitCode: number): Promise<never> {
+  if (sentryEnabled) await sentry.flush();
+  process.exit(exitCode);
+}
+
 export async function flushAndExit(error: unknown, exitCode = 1): Promise<never> {
   if (sentryEnabled) {
     sentry.captureException(error);
