@@ -130,7 +130,7 @@ export function loadConfig(transport: 'stdio' | 'http' = 'stdio'): AivenConfig {
 }
 
 const MARMOT_MCP_PATH = '/api/v1/mcp';
-const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1']);
+const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]']);
 
 export interface MarmotConfig {
   readonly mcpUrl: URL;

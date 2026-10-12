@@ -425,4 +425,22 @@ describe('loadMarmotConfig', () => {
     loadMarmotConfig({ MARMOT_MCP_URL: 'http://localhost:8080', MARMOT_MCP_API_KEY: 'key' }, warn);
     expect(warn).not.toHaveBeenCalled();
   });
+
+  it('does not warn for http:// on IPv6 localhost', () => {
+    const warn = vi.fn();
+    loadMarmotConfig({ MARMOT_MCP_URL: 'http://[::1]:8080', MARMOT_MCP_API_KEY: 'key' }, warn);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('returns undefined when both variables are whitespace', () => {
+    expect(loadMarmotConfig({ MARMOT_MCP_URL: '  ', MARMOT_MCP_API_KEY: '  ' })).toBeUndefined();
+  });
+
+  it('appends the MCP path to a base URL with a trailing slash', () => {
+    const config = loadMarmotConfig({
+      MARMOT_MCP_URL: 'https://marmot.example.com/',
+      MARMOT_MCP_API_KEY: 'key',
+    });
+    expect(config?.mcpUrl.toString()).toBe('https://marmot.example.com/api/v1/mcp');
+  });
 });
