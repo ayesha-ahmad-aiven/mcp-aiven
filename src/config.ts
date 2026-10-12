@@ -128,3 +128,47 @@ export function loadConfig(transport: 'stdio' | 'http' = 'stdio'): AivenConfig {
   const mcpAcornSecret = process.env['MCP_ACORN_SECRET'];
   return { token, readOnly, transport, categories: parsed.categories, allowSecrets, writeAllowlist, mcpAcornSecret };
 }
+
+const MARMOT_MCP_PATH = '/api/v1/mcp';
+const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1']);
+
+export interface MarmotConfig {
+  readonly mcpUrl: URL;
+  readonly apiKey: string;
+}
+
+export function resolveMarmotMcpUrl(raw: string): URL {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`MARMOT_MCP_URL is not a valid URL: ${raw}`);
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    throw new Error(`MARMOT_MCP_URL must use http:// or https://, got ${url.protocol}`);
+  }
+  if (url.pathname === '/' || url.pathname === '') {
+    url.pathname = MARMOT_MCP_PATH;
+  }
+  return url;
+}
+
+export function loadMarmotConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  warn: (message: string) => void = console.error
+): MarmotConfig | undefined {
+  const rawUrl = env['MARMOT_MCP_URL']?.trim() ?? '';
+  const apiKey = env['MARMOT_MCP_API_KEY']?.trim() ?? '';
+  if (rawUrl === '' && apiKey === '') return undefined;
+  if (rawUrl === '' || apiKey === '') {
+    throw new Error('MARMOT_MCP_URL and MARMOT_MCP_API_KEY must be set together');
+  }
+
+  const mcpUrl = resolveMarmotMcpUrl(rawUrl);
+  if (mcpUrl.protocol === 'http:' && !LOCAL_HOSTNAMES.has(mcpUrl.hostname)) {
+    warn(
+      `mcp-aiven: MARMOT_MCP_URL uses http:// for ${mcpUrl.host}; the Marmot API key is sent unencrypted`
+    );
+  }
+  return { mcpUrl, apiKey };
+}
