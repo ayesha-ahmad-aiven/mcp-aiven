@@ -196,6 +196,36 @@ describe('proxied tool handler', () => {
     expect(resultText(result)).toContain('aiven_context_discover_data');
     expect(resultText(result)).not.toContain(API_KEY);
   });
+
+  it.each([
+    ['a successful result', undefined],
+    ['an error result', true],
+  ])('redacts the API key from %s', async (_label, isError) => {
+    const deps = makeDeps({
+      upstream: {
+        callTool: vi.fn().mockResolvedValue({
+          content: [
+            { type: 'text', text: `echo ${API_KEY}` },
+            { type: 'image' },
+            { type: 'text', text: `${API_KEY}${API_KEY}` },
+          ],
+          isError,
+        }),
+      },
+    });
+    const tool = getTool(
+      buildProxyTools([upstreamTool('discover_data')], new Set(), deps),
+      'aiven_context_discover_data'
+    );
+
+    const result = await tool.handler({ reasoning: 'r' }, { token: 't' });
+
+    expect(result.isError).toBe(isError);
+    expect(resultText(result)).toContain('echo [redacted]');
+    for (const item of result.content) {
+      expect(JSON.stringify(item)).not.toContain(API_KEY);
+    }
+  });
 });
 
 describe('toProxiedResult', () => {

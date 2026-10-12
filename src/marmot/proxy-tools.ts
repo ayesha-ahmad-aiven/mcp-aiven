@@ -10,7 +10,7 @@ import {
 } from '../types.js';
 import type { CallerAuthorizer } from './authorize.js';
 import { toProxiedResult } from './result.js';
-import type { MarmotUpstreamClient, UpstreamTool } from './upstream.js';
+import type { MarmotUpstreamClient, UpstreamCallResult, UpstreamTool } from './upstream.js';
 
 export const CONTEXT_TOOL_PREFIX = 'aiven_context_';
 export const CONTEXT_DESCRIPTION_PREFIX = 'Marmot data catalog:';
@@ -59,6 +59,15 @@ export interface ProxyToolDeps {
 
 export function redactSecret(text: string, secret: string): string {
   return secret === '' ? text : text.split(secret).join('[redacted]');
+}
+
+function redactResult(result: UpstreamCallResult, secret: string): UpstreamCallResult {
+  return {
+    ...result,
+    content: result.content.map((item) =>
+      item.text === undefined ? item : { ...item, text: redactSecret(item.text, secret) }
+    ),
+  };
 }
 
 export function buildProxyTools(
@@ -134,7 +143,8 @@ function buildProxyTool(tool: UpstreamTool, name: string, deps: ProxyToolDeps): 
       const args: Record<string, unknown> = { ...(params as Record<string, unknown>) };
       delete args['reasoning'];
       try {
-        return toProxiedResult(await deps.upstream.callTool(tool.name, args), name);
+        const result = await deps.upstream.callTool(tool.name, args);
+        return toProxiedResult(redactResult(result, deps.apiKey), name);
       } catch (error) {
         return toolError(
           redactSecret(`Marmot tool call failed for ${name}: ${errorMessage(error)}`, deps.apiKey)
