@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Must be first import so instrumentation can hook into Express and other modules
 import './instrumentation/index.js';
+import { constants as osConstants } from 'node:os';
 import { loadConfig, loadMarmotConfig } from './config.js';
 import { AivenClient } from './client.js';
 import { errorMessage } from './errors.js';
@@ -20,11 +21,12 @@ import {
   isExtraProtectionEnabled,
   loadEdgeAuthSecret,
 } from './config.js';
-import { instrumentServer, flushAndExit } from './instrumentation/index.js';
+import { instrumentServer, flushAndExit, flushAndExitCleanly } from './instrumentation/index.js';
 import { summarizeCatalog } from './tool-catalog.js';
 import { createMcpServerFactory, registerAdditionalTools } from './server-factory.js';
 import { createCallerAuthorizer } from './marmot/authorize.js';
 import { MarmotIntegration } from './marmot/integration.js';
+import { redactSecret } from './marmot/proxy-tools.js';
 
 function logEnvReport(): void {
   const names = Object.keys(process.env).sort();
@@ -61,12 +63,26 @@ function loadAllTools(client: AivenClient): ToolDefinition[] {
   ];
 }
 
+const MARMOT_CLOSE_TIMEOUT_MS = 5_000;
+
 function closeOnShutdown(marmot: MarmotIntegration): void {
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.once(signal, () => {
-      void marmot.close().finally(() => process.exit(0));
+      const timeout = new Promise<void>((resolve) => {
+        setTimeout(resolve, MARMOT_CLOSE_TIMEOUT_MS);
+      });
+      const closed = marmot.close().catch(() => undefined);
+      void Promise.race([closed, timeout]).then(() =>
+        flushAndExitCleanly(128 + osConstants.signals[signal])
+      );
     });
   }
+}
+
+function startMarmotInBackground(marmot: MarmotIntegration, apiKey: string): void {
+  marmot.start().catch((error: unknown) => {
+    console.error(`mcp-aiven: Marmot startup failed: ${redactSecret(errorMessage(error), apiKey)}`);
+  });
 }
 
 // A throwing listener would stop MarmotIntegration's background rediscovery.
@@ -101,7 +117,6 @@ async function main(): Promise<void> {
     existingToolNames,
     authorize: createCallerAuthorizer(client),
   });
-  await marmot.start();
   if (marmotConfig) closeOnShutdown(marmot);
 
   const getTools = (): readonly ToolDefinition[] => [...aivenTools, ...marmot.tools];
@@ -139,6 +154,8 @@ async function main(): Promise<void> {
     await server.connect(createStdioTransport());
     console.error('mcp-aiven: Server connected and ready');
   }
+
+  if (marmotConfig) startMarmotInBackground(marmot, marmotConfig.apiKey);
 }
 
 main().catch(async (error: unknown) => {

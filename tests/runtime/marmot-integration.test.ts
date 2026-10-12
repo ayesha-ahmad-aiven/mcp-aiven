@@ -2,8 +2,7 @@ import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveMarmotMcpUrl, type MarmotConfig } from '../../src/config.js';
 import { MarmotIntegration, type MarmotIntegrationOptions } from '../../src/marmot/integration.js';
-import { MarmotDiscoveryError } from '../../src/marmot/proxy-tools.js';
-import type { MarmotUpstreamClient } from '../../src/marmot/upstream.js';
+import { connectMarmotUpstream, type MarmotUpstreamClient } from '../../src/marmot/upstream.js';
 import type { ToolDefinition } from '../../src/types.js';
 import {
   FAKE_MARMOT_API_KEY,
@@ -81,14 +80,72 @@ describe('MarmotIntegration', () => {
     expect(first?.type === 'text' ? first.text : '').toContain('"query":"orders"');
   });
 
-  it('fails startup when discovery finds a name collision', async () => {
+  it('notifies listeners when the initial discovery succeeds', async () => {
     fake = await startFakeMarmot();
+    const listener = vi.fn<(tools: readonly ToolDefinition[]) => void>();
+    const marmot = makeIntegration({ config: configFor(fake) });
+    marmot.onToolsDiscovered(listener);
+
+    await marmot.start();
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener.mock.calls[0]?.[0].map((tool) => tool.name)).toEqual([
+      'aiven_context_discover_data',
+    ]);
+  });
+
+  it('stays unavailable without retrying when startup discovery finds a name collision', async () => {
+    fake = await startFakeMarmot();
+    const log = vi.fn();
+    const listener = vi.fn();
+    const connect = vi.fn(connectMarmotUpstream);
     const marmot = makeIntegration({
       config: configFor(fake),
       existingToolNames: new Set(['aiven_context_discover_data']),
+      connect,
+      log,
+    });
+    marmot.onToolsDiscovered(listener);
+
+    await expect(marmot.start()).resolves.toBeUndefined();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(marmot.status).toBe('unavailable');
+    expect(marmot.tools).toEqual([]);
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(listener).not.toHaveBeenCalled();
+    const logged = log.mock.calls.map(([message]) => String(message)).join('\n');
+    expect(logged).toContain('aiven_context_discover_data');
+    expect(logged).not.toContain(FAKE_MARMOT_API_KEY);
+  });
+
+  it('stops background rediscovery when it finds a name collision', async () => {
+    fake = await startFakeMarmot();
+    fake.setAvailable(false);
+    const log = vi.fn();
+    const connect = vi.fn(connectMarmotUpstream);
+    const marmot = makeIntegration({
+      config: configFor(fake),
+      existingToolNames: new Set(['aiven_context_discover_data']),
+      connect,
+      log,
     });
 
-    await expect(marmot.start()).rejects.toThrow(MarmotDiscoveryError);
+    await marmot.start();
+    const startupAttempts = connect.mock.calls.length;
+    fake.setAvailable(true);
+    await vi.waitFor(() => {
+      expect(connect.mock.calls.length).toBeGreaterThan(startupAttempts);
+    });
+    const afterCollision = connect.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(connect).toHaveBeenCalledTimes(afterCollision);
+    expect(marmot.status).toBe('unavailable');
+    expect(marmot.tools).toEqual([]);
+    const logged = log.mock.calls.map(([message]) => String(message)).join('\n');
+    expect(logged).toContain('aiven_context_discover_data');
+    expect(logged).not.toContain(FAKE_MARMOT_API_KEY);
   });
 
   it('retries, starts degraded, then discovers tools in the background', async () => {
@@ -167,10 +224,12 @@ describe('MarmotIntegration', () => {
       callTool: vi.fn(),
       close: vi.fn().mockResolvedValue(undefined),
     };
+    const listener = vi.fn();
     const marmot = makeIntegration({
       config: configFor(fake),
       connect: () => Promise.resolve(upstream),
     });
+    marmot.onToolsDiscovered(listener);
 
     const starting = marmot.start();
     await vi.waitFor(() => {
@@ -183,5 +242,6 @@ describe('MarmotIntegration', () => {
     expect(upstream.close).toHaveBeenCalledTimes(1);
     expect(marmot.status).toBe('unavailable');
     expect(marmot.tools).toEqual([]);
+    expect(listener).not.toHaveBeenCalled();
   });
 });

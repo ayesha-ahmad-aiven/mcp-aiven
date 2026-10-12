@@ -62,10 +62,13 @@ export class MarmotIntegration {
     for (let attempt = 0; attempt < attempts; attempt++) {
       if (this.closed) return;
       try {
-        await this.discover(config);
+        if (await this.discover(config)) this.notify();
         return;
       } catch (error) {
-        if (error instanceof MarmotDiscoveryError) throw error;
+        if (error instanceof MarmotDiscoveryError) {
+          this.logDiscoveryError(error);
+          return;
+        }
         this.log(
           `Marmot connection attempt ${attempt + 1} of ${attempts} failed: ${this.describe(error)}`
         );
@@ -102,14 +105,33 @@ export class MarmotIntegration {
     this.discovering = true;
     try {
       if (!(await this.discover(config))) return;
-      if (this.timer) clearInterval(this.timer);
-      this.timer = undefined;
-      for (const listener of this.listeners) listener(this.discovered);
+      this.stopRediscovery();
+      this.notify();
     } catch (error) {
+      if (error instanceof MarmotDiscoveryError) {
+        this.stopRediscovery();
+        this.logDiscoveryError(error);
+        return;
+      }
       this.log(`Marmot rediscovery failed: ${this.describe(error)}`);
     } finally {
       this.discovering = false;
     }
+  }
+
+  private stopRediscovery(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+  }
+
+  private notify(): void {
+    for (const listener of this.listeners) listener(this.discovered);
+  }
+
+  private logDiscoveryError(error: MarmotDiscoveryError): void {
+    this.log(
+      `Marmot data catalog tools disabled until restart: ${this.describe(error)}`
+    );
   }
 
   private async discover(config: MarmotConfig): Promise<boolean> {
