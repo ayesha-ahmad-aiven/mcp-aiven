@@ -109,6 +109,8 @@ export interface ToolDefinition<TInput extends z.ZodType = z.ZodType> {
     annotations: ToolAnnotations;
     outputSchema?: z.ZodType | undefined;
   };
+  /** JSON Schema advertised in tools/list instead of the one generated from `definition.inputSchema`. */
+  advertisedInputSchema?: Record<string, unknown> | undefined;
   handler: (params: z.infer<TInput>, context?: HandlerContext) => Promise<ToolResult>;
 }
 
