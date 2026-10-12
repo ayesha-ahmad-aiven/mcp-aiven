@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 // Must be first import so instrumentation can hook into Express and other modules
 import './instrumentation/index.js';
-import { loadConfig } from './config.js';
+import { loadConfig, loadMarmotConfig } from './config.js';
 import { AivenClient } from './client.js';
+import { errorMessage } from './errors.js';
 import { loadApiTools } from './tools/registry.js';
 import { createKafkaCustomTools } from './tools/kafka/index.js';
 import { createPgCustomTools } from './tools/pg/index.js';
 import { createApplicationTools } from './tools/applications/index.js';
 import { createDocsTools } from './tools/docs/index.js';
 import { createServiceSearchTool } from './tools/service-search.js';
+import { createConnectionInfoTool } from './tools/connection-info.js';
 import { createStdioTransport, startHttpServer } from './transport.js';
 import type { ToolDefinition, McpRequestOptions } from './types.js';
 import {
@@ -20,7 +22,9 @@ import {
 } from './config.js';
 import { instrumentServer, flushAndExit } from './instrumentation/index.js';
 import { summarizeCatalog } from './tool-catalog.js';
-import { createMcpServerFactory } from './server-factory.js';
+import { createMcpServerFactory, registerAdditionalTools } from './server-factory.js';
+import { createCallerAuthorizer } from './marmot/authorize.js';
+import { MarmotIntegration } from './marmot/integration.js';
 
 function logEnvReport(): void {
   const names = Object.keys(process.env).sort();
@@ -57,16 +61,56 @@ function loadAllTools(client: AivenClient): ToolDefinition[] {
   ];
 }
 
+function closeOnShutdown(marmot: MarmotIntegration): void {
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(signal, () => {
+      void marmot.close().finally(() => process.exit(0));
+    });
+  }
+}
+
+// A throwing listener would stop MarmotIntegration's background rediscovery.
+function onMarmotToolsDiscovered(
+  marmot: MarmotIntegration,
+  listener: (tools: readonly ToolDefinition[]) => void
+): void {
+  marmot.onToolsDiscovered((tools) => {
+    try {
+      listener(tools);
+    } catch (error) {
+      console.error(
+        `mcp-aiven: failed to add Marmot data catalog tools to the server: ${errorMessage(error)}`
+      );
+    }
+  });
+}
+
 async function main(): Promise<void> {
   const transport = process.env['MCP_TRANSPORT'] === 'http' ? 'http' : 'stdio';
   logEnvReport();
   const config = loadConfig(transport);
+  const marmotConfig = loadMarmotConfig();
   const client = new AivenClient(config);
 
-  const allTools: readonly ToolDefinition[] = loadAllTools(client);
-  logToolCatalog(allTools);
+  const aivenTools: readonly ToolDefinition[] = loadAllTools(client);
+  const existingToolNames = new Set(
+    [...aivenTools, ...createConnectionInfoTool(client, false)].map((tool) => tool.name)
+  );
+  const marmot = new MarmotIntegration({
+    config: marmotConfig,
+    existingToolNames,
+    authorize: createCallerAuthorizer(client),
+  });
+  await marmot.start();
+  if (marmotConfig) closeOnShutdown(marmot);
 
-  const createMcpServer = createMcpServerFactory({ transport, client, getTools: () => allTools });
+  const getTools = (): readonly ToolDefinition[] => [...aivenTools, ...marmot.tools];
+  logToolCatalog(getTools());
+  onMarmotToolsDiscovered(marmot, () => {
+    logToolCatalog(getTools());
+  });
+
+  const createMcpServer = createMcpServerFactory({ transport, client, getTools });
 
   if (transport === 'http') {
     startHttpServer((options) => instrumentServer(createMcpServer(options)), {
@@ -77,6 +121,9 @@ async function main(): Promise<void> {
       readOnly: config.readOnly,
       extraProtection: isExtraProtectionEnabled(),
       edgeAuthSecret: loadEdgeAuthSecret(),
+      healthDetails: marmotConfig
+        ? (): Record<string, string> => ({ marmot: marmot.status })
+        : undefined,
     });
   } else {
     const options: McpRequestOptions = {
@@ -86,6 +133,9 @@ async function main(): Promise<void> {
       writeAllowlist: config.writeAllowlist,
     };
     const server = instrumentServer(createMcpServer(options));
+    onMarmotToolsDiscovered(marmot, (tools) => {
+      registerAdditionalTools(server, tools, options);
+    });
     await server.connect(createStdioTransport());
     console.error('mcp-aiven: Server connected and ready');
   }

@@ -188,10 +188,26 @@ MCP_HOST=http://localhost:3000 node dist/index.js
 | `MCP_HTTP_RATE_LIMIT_WINDOW_MS` | No | `60000` | Window length in milliseconds for `MCP_HTTP_RATE_LIMIT_MAX`. |
 | `EXTRA_PROTECTION` | No | `false` | Set to `true` on HTTP deployments to require a valid `X-Edge-Auth` header on every request except `GET /health`. See [Edge protection rollout](#edge-protection-rollout) below. |
 | `MCP_EDGE_AUTH_SECRET` | When `EXTRA_PROTECTION=true` | -- | Shared secret; must match the value Cloudflare injects as `X-Edge-Auth` via Transform Rules. |
+| `MARMOT_MCP_URL` | No | -- | Marmot base URL. Enables the Marmot data catalog tools. `/api/v1/mcp` is appended when the URL has no path. Requires `MARMOT_MCP_API_KEY`. |
+| `MARMOT_MCP_API_KEY` | With `MARMOT_MCP_URL` | -- | Marmot API key shared by every caller. |
 
 In remote (HTTP) mode, `AIVEN_TOKEN` is not needed. Your MCP client sends your token as a Bearer token with each request.
 
 Production HTTP traffic is rate-limited in two layers: Cloudflare enforces a per-client-IP limit (configured in the Cloudflare dashboard), and this server enforces `MCP_HTTP_RATE_LIMIT_*` per bearer token on `POST /mcp`.
+
+### Marmot data catalog tools (demo)
+
+`mcp-aiven` can expose the tools of a [Marmot](https://marmotdata.io) data catalog as `aiven_context_*` tools. For example, Marmot's `discover_data` becomes `aiven_context_discover_data`. Set `MARMOT_MCP_URL` and `MARMOT_MCP_API_KEY` to enable them:
+
+```bash
+MARMOT_MCP_URL=https://marmot.example.com MARMOT_MCP_API_KEY=<key> node dist/index.js
+```
+
+Callers need a valid Aiven token. Every caller uses the same Marmot API key, and any Aiven user who can reach the server can call these tools. Use a Marmot service account with view permissions only, and keep only demo data in Marmot.
+
+If Marmot is unreachable at startup, the server starts without these tools and retries every 60 seconds. When Marmot is configured, `GET /health` reports `marmot` as `ok` or `unavailable`. The tools belong to the `context` scope.
+
+Marmot must accept the `Host` header of its public hostname.
 
 ### Edge protection rollout
 

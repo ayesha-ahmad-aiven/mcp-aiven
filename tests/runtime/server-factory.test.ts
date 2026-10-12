@@ -251,4 +251,21 @@ describe('registerAdditionalTools', () => {
       await server.close();
     }
   });
+
+  it('skips tools the server already has', async () => {
+    const { tools } = makeProxyTools();
+    const factory = createMcpServerFactory({
+      transport: 'stdio',
+      client: mockClient(),
+      getTools: () => tools,
+    });
+    const server = factory(DEFAULT_OPTIONS);
+
+    expect(() => {
+      registerAdditionalTools(server, tools, DEFAULT_OPTIONS);
+    }).not.toThrow();
+
+    const names = (await listTools(server)).map((tool) => tool.name);
+    expect(names).toEqual(['aiven_context_discover_data', 'aiven_context_manage_tags']);
+  });
 });

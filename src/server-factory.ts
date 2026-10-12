@@ -145,7 +145,8 @@ export function registerAdditionalTools(
   tools: readonly ToolDefinition[],
   options: McpRequestOptions
 ): void {
-  const selected = selectTools(tools, options);
+  const listed = new Set((listedTools.get(server) ?? []).map((tool) => tool.name));
+  const selected = selectTools(tools, options).filter((tool) => !listed.has(tool.name));
   if (selected.length === 0) return;
   registerTools(server, selected, options);
   listedTools.get(server)?.push(...selected);
