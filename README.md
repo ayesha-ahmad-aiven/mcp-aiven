@@ -205,7 +205,7 @@ MARMOT_MCP_URL=https://marmot.example.com MARMOT_MCP_API_KEY=<key> node dist/ind
 
 Callers need a valid Aiven token. Every caller uses the same Marmot API key, and any Aiven user who can reach the server can call these tools. Use a Marmot service account with view permissions only, and keep only demo data in Marmot.
 
-If Marmot is unreachable at startup, the server starts without these tools and retries every 60 seconds. When Marmot is configured, `GET /health` reports `marmot` as `ok` or `unavailable`. The tools belong to the `context` scope.
+The server does not wait for Marmot: it starts serving the Aiven tools immediately and adds the Marmot tools once discovery succeeds. If Marmot is unreachable, it retries every 60 seconds. If a Marmot tool name collides with an existing tool, the Marmot tools stay disabled until restart and the server keeps running. When Marmot is configured, `GET /health` reports `marmot` as `ok` or `unavailable`. The tools belong to the `context` scope.
 
 Marmot must accept the `Host` header of its public hostname.
 
