@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { resolveMarmotMcpUrl, type MarmotConfig } from '../../src/config.js';
-import { connectMarmotUpstream } from '../../src/marmot/upstream.js';
+import { connectMarmotUpstream, MAX_TOOL_LIST_PAGES } from '../../src/marmot/upstream.js';
 import {
   FAKE_MARMOT_API_KEY,
   marmotTool,
@@ -48,6 +48,34 @@ describe('connectMarmotUpstream', () => {
       const result = await upstream.callTool('discover_data', { query: 'orders' });
       expect(fake.calls).toEqual([{ name: 'discover_data', args: { query: 'orders' } }]);
       expect(result).toEqual({ content: [{ type: 'text', text: 'not found' }], isError: true });
+    } finally {
+      await upstream.close();
+    }
+  });
+
+  it('rejects a repeated tool list cursor', async () => {
+    fake = await startFakeMarmot({ nextCursor: () => 'same' });
+    const upstream = await connectMarmotUpstream(configFor(fake));
+    try {
+      const error = await upstream.listAllTools().catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(/repeated/i);
+      expect((error as Error).message).not.toContain(FAKE_MARMOT_API_KEY);
+    } finally {
+      await upstream.close();
+    }
+  });
+
+  it('rejects tool lists longer than the page cap', async () => {
+    fake = await startFakeMarmot({
+      nextCursor: (cursor) => String(cursor === undefined ? 1 : Number(cursor) + 1),
+    });
+    const upstream = await connectMarmotUpstream(configFor(fake));
+    try {
+      const error = await upstream.listAllTools().catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain(String(MAX_TOOL_LIST_PAGES));
+      expect((error as Error).message).not.toContain(FAKE_MARMOT_API_KEY);
     } finally {
       await upstream.close();
     }

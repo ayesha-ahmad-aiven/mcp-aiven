@@ -4,6 +4,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { VERSION, type MarmotConfig } from '../config.js';
 
 export const MARMOT_CALL_TIMEOUT_MS = 30_000;
+export const MAX_TOOL_LIST_PAGES = 100;
 
 export interface UpstreamToolAnnotations {
   readonly title?: string | undefined;
@@ -50,8 +51,18 @@ export async function connectMarmotUpstream(
   return {
     async listAllTools(): Promise<UpstreamTool[]> {
       const tools: UpstreamTool[] = [];
+      const seenCursors = new Set<string>();
       let cursor: string | undefined;
+      let pages = 0;
       do {
+        if (pages >= MAX_TOOL_LIST_PAGES) {
+          throw new Error(`Marmot tool list exceeded ${MAX_TOOL_LIST_PAGES} pages`);
+        }
+        if (cursor !== undefined) {
+          if (seenCursors.has(cursor)) throw new Error('Marmot tool list repeated a page cursor');
+          seenCursors.add(cursor);
+        }
+        pages++;
         const page = await client.listTools(cursor === undefined ? undefined : { cursor }, {
           timeout: callTimeoutMs,
         });

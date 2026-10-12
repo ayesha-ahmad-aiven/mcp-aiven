@@ -19,6 +19,7 @@ export interface FakeMarmotCall {
 export interface FakeMarmotOptions {
   apiKey?: string;
   toolPages?: Tool[][];
+  nextCursor?: (cursor: string | undefined) => string | undefined;
   onCall?: (call: FakeMarmotCall) => CallToolResult | Promise<CallToolResult>;
 }
 
@@ -82,6 +83,10 @@ export async function startFakeMarmot(options: FakeMarmotOptions = {}): Promise<
       );
       mcpServer.setRequestHandler(ListToolsRequestSchema, (request) => {
         const cursor = request.params?.cursor;
+        if (options.nextCursor) {
+          const nextCursor = options.nextCursor(cursor);
+          return { tools: [], ...(nextCursor === undefined ? {} : { nextCursor }) };
+        }
         const index = cursor === undefined ? 0 : Number(cursor);
         const next = index + 1 < pages.length ? { nextCursor: String(index + 1) } : {};
         return { tools: pages[index] ?? [], ...next };
